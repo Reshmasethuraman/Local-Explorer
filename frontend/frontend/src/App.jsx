@@ -1,489 +1,485 @@
 import { useEffect, useMemo, useState } from "react";
 import "./App.css";
 
-const CATEGORY_TABS = [
-  { key: "Food", label: "Food", emoji: "🍽️" },
-  { key: "Fun", label: "Fun", emoji: "🎮" },
-  { key: "Park", label: "Parks", emoji: "🌳" },
-  { key: "Movie", label: "Movies", emoji: "🎬" },
-  { key: "Mall", label: "Malls", emoji: "🛍️" },
-  { key: "Beach", label: "Beaches", emoji: "🏖️" },
-  { key: "Pilgrimage", label: "Pilgrimage", emoji: "🛕" },
+const CATEGORIES = [
+  { key: "Food", label: "Food & Dining", emoji: "🍽️", color: "#EF4444" },
+  { key: "Fun", label: "Entertainment", emoji: "🎮", color: "#8B5CF6" },
+  { key: "Park", label: "Parks & Nature", emoji: "🌳", color: "#10B981" },
+  { key: "Movie", label: "Movies", emoji: "🎬", color: "#F59E0B" },
+  { key: "Mall", label: "Shopping", emoji: "🛍️", color: "#EC4899" },
+  { key: "Beach", label: "Beaches", emoji: "🏖️", color: "#06B6D4" },
+  { key: "Pilgrimage", label: "Spiritual", emoji: "🛕", color: "#F97316" },
+  { key: "Activities", label: "Activities", emoji: "🎯", color: "#6366F1" },
 ];
 
-// Your backend OSM currently supports Food/Park/Movie/Fun only.
-// Others will fallback; later you can enhance backend mapping.
-function normalizeCategoryForOSM(cat) {
-  if (cat === "Beach") return "Park";
-  if (cat === "Mall") return "Fun";
-  if (cat === "Pilgrimage") return "Fun";
-  return cat;
-}
-
-// Estimated cost per person for OSM places (simple and explainable)
-function estimateCostPerPerson(placeCategory) {
-  const c = (placeCategory || "").toLowerCase();
-
-  if (c.includes("park") || c.includes("beach")) return 20; // mostly free
-  if (c.includes("pilgrimage")) return 30; // transport/offerings
-  if (c.includes("movie")) return 250; // ticket avg
-  if (c.includes("fun") || c.includes("mall")) return 350; // arcade/trampoline/mall spend
-  // food default
-  return 200;
-}
-
-// Build a 1-day plan based on budget per person
-function buildDayPlan({ places, mode, budgetPerPerson, peopleCount }) {
-  // Separate into buckets
-  const food = [];
-  const park = [];
-  const fun = [];
-  const movie = [];
-  const other = [];
-
-  for (const p of places) {
-    const cat = (p.category || "").toLowerCase();
-    if (cat.includes("food")) food.push(p);
-    else if (cat.includes("park") || cat.includes("beach")) park.push(p);
-    else if (cat.includes("fun") || cat.includes("mall")) fun.push(p);
-    else if (cat.includes("movie")) movie.push(p);
-    else other.push(p);
-  }
-
-  // Helper to get per-person cost for a place
-  const costFor = (p) => {
-    if (mode === "DB") {
-      // DB places have real budget field
-      return Number(p.budget || 0);
-    }
-    // OSM places: estimate based on category
-    return estimateCostPerPerson(p.category);
-  };
-
-  // Filter any place that exceeds budget per person (for DB)
-  // For OSM, we don't "exceed" — we just estimate and compare.
-  const withinBudget = (p) => costFor(p) <= budgetPerPerson;
-
-  const pickOne = (arr) => {
-    const candidates = arr.filter(withinBudget);
-    return candidates[0] || null;
-  };
-
-  // Plan slots (simple, review-friendly)
-  const breakfast = pickOne(food);
-  const midActivity = pickOne(park.length ? park : fun);
-  const lunch = pickOne(food.filter((p) => p !== breakfast));
-  const evening = pickOne(movie.length ? movie : fun.filter((p) => p !== midActivity));
-  const dinner = pickOne(food.filter((p) => p !== breakfast && p !== lunch));
-
-  const slots = [
-    { title: "Breakfast", icon: "🥞", place: breakfast },
-    { title: "Activity", icon: "✨", place: midActivity },
-    { title: "Lunch", icon: "🍛", place: lunch },
-    { title: "Evening", icon: "🌆", place: evening },
-    { title: "Dinner", icon: "🍽️", place: dinner },
-  ];
-
-  const chosen = slots.map((s) => s.place).filter(Boolean);
-  const perPersonTotal = chosen.reduce((sum, p) => sum + costFor(p), 0);
-  const groupTotal = perPersonTotal * peopleCount;
-
-  // If nothing fits, return helpful message
-  const ok = chosen.length > 0;
-
-  return {
-    ok,
-    slots,
-    perPersonTotal,
-    groupTotal,
-    notes: ok
-      ? []
-      : [
-          "No places fit your budget. Increase budget or switch category/mode.",
-          "Tip: Parks/Beaches are usually cheapest.",
-        ],
-  };
-}
+// Change this if your backend runs on another URL
+const API_BASE = "http://localhost:5000";
 
 export default function App() {
   const [places, setPlaces] = useState([]);
+  const [filteredPlaces, setFilteredPlaces] = useState([]);
 
-  // Modes: DB / OSM_NEARBY / OSM_AREA
-  const [mode, setMode] = useState("OSM_AREA");
-  const [activeCategory, setActiveCategory] = useState("Food");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
-  // Area search
-  const [areaQuery, setAreaQuery] = useState("Anna Nagar, Chennai");
-  const [areaInfo, setAreaInfo] = useState(null);
-
-  // Budget controls
+  // Search state
+  const [location, setLocation] = useState("Anna Nagar, Chennai");
+  const [category, setCategory] = useState("Food");
   const [peopleCount, setPeopleCount] = useState(2);
-  const [budgetPerPerson, setBudgetPerPerson] = useState(800); // ₹ per person
+  const [budgetPerPerson, setBudgetPerPerson] = useState(800);
+  const [radius, setRadius] = useState(2000);
 
-  // Built plan
-  const [plan, setPlan] = useState(null);
+  // Location & weather
+  const [locationData, setLocationData] = useState(null);
+  const [weather, setWeather] = useState(null);
 
-  const modeLabel = useMemo(() => {
-    if (mode === "DB") return "Saved places (MongoDB)";
-    if (mode === "OSM_NEARBY") return "Nearby (My Location)";
-    if (mode === "OSM_AREA") return "Nearby (Area Search)";
-    return "Explore";
-  }, [mode]);
+  // Plan
+  const [dayPlan, setDayPlan] = useState(null);
 
-  async function fetchByAreaSearch(cat = activeCategory) {
+  const totalBudget = useMemo(
+    () => (Number(budgetPerPerson) || 0) * (Number(peopleCount) || 1),
+    [budgetPerPerson, peopleCount]
+  );
+
+  function normalizePlaces(rawPlaces = []) {
+    // Ensures your UI never crashes even if backend misses fields
+    return rawPlaces.map((p) => ({
+      id: p.id || p.place_id || crypto.randomUUID(),
+      name: p.name || "Unknown place",
+      location: p.location || p.vicinity || "Unknown location",
+      rating: typeof p.rating === "number" ? p.rating : null,
+      ratingCount:
+        typeof p.ratingCount === "number"
+          ? p.ratingCount
+          : typeof p.user_ratings_total === "number"
+          ? p.user_ratings_total
+          : 0,
+      budget: typeof p.budget === "number" ? p.budget : 500, // fallback budget
+      openNow: Boolean(p.openNow ?? p.open_now ?? p.opening_hours?.open_now),
+      googleMapsUrl: p.googleMapsUrl || p.url || p.google_maps_url || "",
+      photos: Array.isArray(p.photos) ? p.photos : [], // expected: [{ url }]
+    }));
+  }
+
+  function filterPlacesByBudget(list = places) {
+    const ppl = Number(peopleCount) || 1;
+    const perPerson = Number(budgetPerPerson) || 0;
+    const maxTotal = ppl * perPerson;
+
+    const filtered = list
+      .filter((place) => {
+        const budget = typeof place.budget === "number" ? place.budget : 500;
+        return budget * ppl <= maxTotal;
+      })
+      .sort((a, b) => (b.rating || 0) - (a.rating || 0));
+
+    setFilteredPlaces(filtered);
+  }
+
+  async function searchPlaces() {
+    setLoading(true);
+    setError("");
+    setDayPlan(null);
+
     try {
-      setMode("OSM_AREA");
-      setPlan(null);
+      // 1) Geocode
+      const geoRes = await fetch(
+        `${API_BASE}/api/geocode?q=${encodeURIComponent(location)}`
+      );
+      const geoData = await geoRes.json();
 
-      const geoUrl = `http://localhost:5000/api/geocode?q=${encodeURIComponent(areaQuery)}`;
-      const geoRes = await fetch(geoUrl);
-      const geo = await geoRes.json();
+      if (!geoRes.ok) {
+        throw new Error(geoData?.message || "Geocoding request failed");
+      }
 
-      if (!geo?.lat || !geo?.lng) {
-        alert("Area not found. Try: 'Anna Nagar, Chennai' or 'T Nagar, Chennai'");
+      if (!geoData?.lat || !geoData?.lng) {
+        throw new Error(geoData?.suggestion || "Location not found");
+      }
+
+      setLocationData(geoData);
+
+      // 2) Weather (optional)
+      try {
+        const weatherRes = await fetch(
+          `${API_BASE}/api/weather?lat=${geoData.lat}&lng=${geoData.lng}`
+        );
+        const weatherData = await weatherRes.json();
+        if (weatherRes.ok) setWeather(weatherData);
+      } catch {
+        // ignore weather failures
+      }
+
+      // 3) Nearby places
+      const url = `${API_BASE}/api/google/nearby?lat=${geoData.lat}&lng=${geoData.lng}&category=${encodeURIComponent(
+        category
+      )}&radius=${encodeURIComponent(radius)}`;
+
+      const placesRes = await fetch(url);
+      const placesData = await placesRes.json();
+
+      if (!placesRes.ok) {
+        throw new Error(
+          placesData?.message ||
+            placesData?.error ||
+            "Failed to fetch places from Google"
+        );
+      }
+
+      if (!placesData?.success) {
+        throw new Error(placesData?.message || "Google Places API error");
+      }
+
+      const normalized = normalizePlaces(placesData.places || []);
+      setPlaces(normalized);
+
+      if (normalized.length === 0) {
+        setFilteredPlaces([]);
+        setError("No places found. Try increasing radius or changing location.");
         return;
       }
-      setAreaInfo(geo);
 
-      const osmCat = normalizeCategoryForOSM(cat);
-      const nearbyUrl = `http://localhost:5000/api/osm/nearby?lat=${geo.lat}&lng=${geo.lng}&category=${encodeURIComponent(
-        osmCat
-      )}`;
-
-      const nearby = await fetch(nearbyUrl).then((r) => r.json());
-
-      // IMPORTANT: attach your chosen category so budget estimator works consistently
-      const normalized = Array.isArray(nearby)
-        ? nearby.map((p) => ({ ...p, category: osmCat }))
-        : [];
-
-      setPlaces(normalized);
+      // 4) Budget filter
+      filterPlacesByBudget(normalized);
     } catch (e) {
-      console.error(e);
-      alert("Error searching this area. Check backend routes are running.");
+      setPlaces([]);
+      setFilteredPlaces([]);
+      setError(e?.message || "Something went wrong");
+    } finally {
+      setLoading(false);
     }
   }
 
-  function fetchNearbyMyLocation(cat = activeCategory) {
-    if (!navigator.geolocation) {
-      alert("Geolocation not supported in this browser");
+  // Re-filter when budget/people changes
+  useEffect(() => {
+    filterPlacesByBudget(places);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [budgetPerPerson, peopleCount]);
+
+  // Auto-search when category changes (and on first load)
+  useEffect(() => {
+    searchPlaces();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [category]);
+
+  function buildDayPlan() {
+    if (!filteredPlaces.length) {
+      alert("No places found within budget!");
       return;
     }
 
-    setMode("OSM_NEARBY");
-    setAreaInfo(null);
-    setPlan(null);
+    const ppl = Number(peopleCount) || 1;
 
-    navigator.geolocation.getCurrentPosition(
-      async (pos) => {
-        const lat = pos.coords.latitude;
-        const lng = pos.coords.longitude;
-        const osmCat = normalizeCategoryForOSM(cat);
+    const pick = (i) => filteredPlaces[i] || filteredPlaces[0];
+    const chosen = [pick(0), pick(1), pick(2)];
 
-        const url = `http://localhost:5000/api/osm/nearby?lat=${lat}&lng=${lng}&category=${encodeURIComponent(
-          osmCat
-        )}`;
+    const plan = {
+      morning: chosen[0],
+      afternoon: chosen[1],
+      evening: chosen[2],
+      totalCost: chosen.reduce((sum, p) => sum + (p.budget || 0) * ppl, 0),
+    };
 
-        try {
-          const data = await fetch(url).then((r) => r.json());
-          const normalized = Array.isArray(data) ? data.map((p) => ({ ...p, category: osmCat })) : [];
-          setPlaces(normalized);
-        } catch (e) {
-          console.error(e);
-          setPlaces([]);
-        }
-      },
-      () => alert("Location permission denied or unavailable")
-    );
+    setDayPlan(plan);
   }
 
-  function fetchFromDB() {
-    setMode("DB");
-    setAreaInfo(null);
-    setPlan(null);
-
-    let url = "http://localhost:5000/api/places?";
-    if (activeCategory) url += `category=${encodeURIComponent(activeCategory)}&`;
-
-    fetch(url)
-      .then((r) => r.json())
-      .then((data) => setPlaces(Array.isArray(data) ? data : []))
-      .catch(() => setPlaces([]));
-  }
-
-  useEffect(() => {
-    // Load by area search like your main use-case
-    fetchByAreaSearch("Food");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  function onBuildPlan() {
-    const built = buildDayPlan({
-      places,
-      mode: mode === "DB" ? "DB" : "OSM",
-      budgetPerPerson: Number(budgetPerPerson),
-      peopleCount: Number(peopleCount),
-    });
-    setPlan(built);
-  }
-
-  const hint = useMemo(() => {
-    if (mode === "DB") return "Uses stored budgets from MongoDB.";
-    return "Uses estimated budgets (since live APIs don't provide exact price).";
-  }, [mode]);
+  const withinBudgetCount = filteredPlaces.length;
+  const avgRating =
+    filteredPlaces.length > 0
+      ? (
+          filteredPlaces.reduce((sum, p) => sum + (p.rating || 0), 0) /
+          filteredPlaces.length
+        ).toFixed(1)
+      : "0";
 
   return (
-    <div className="page">
-      <section className="heroV2">
-        <div className="heroMask" />
-        <div className="heroInner">
-          <div className="navRow">
-            <div className="brand">
-              <div className="brandDot" />
-              <div>
-                <div className="brandName">Local Explorer</div>
-                <div className="brandTag">Budget-first local plans • People-based</div>
-              </div>
-            </div>
+    <div className="app">
+      {/* Hero */}
+      <section className="hero">
+        <div className="hero-gradient" />
+        <div className="hero-content">
+          <div className="hero-badge">✨ Powered by Google Places API</div>
 
-            <div className="modePills">
-              <span className="pill">{modeLabel}</span>
-              {mode === "OSM_AREA" && areaInfo?.displayName ? (
-                <span className="pill pillLight" title={areaInfo.displayName}>
-                  Area: {areaQuery}
-                </span>
-              ) : null}
-            </div>
-          </div>
+          <h1 className="hero-title">
+            Discover Amazing Places
+            <br />
+            <span className="gradient-text">Within Your Budget</span>
+          </h1>
 
-          <h1 className="heroTitle2">Budget-friendly plans, instantly ✨</h1>
-          <p className="heroSub2">
-            Enter <b>people</b> + <b>per-person budget</b>, then build a 1-day plan (Food + Activity + Evening).
+          <p className="hero-subtitle">
+            Real-time data • Accurate ratings • Smart recommendations
           </p>
 
-          <div className="searchBar">
-            <div className="searchField">
-              <label>Area</label>
+          {weather && locationData && (
+            <div className="weather-card">
+              {weather.icon && (
+                <img
+                  src={`https://openweathermap.org/img/wn/${weather.icon}@2x.png`}
+                  alt={weather.description || "weather"}
+                  style={{ width: 60, height: 60 }}
+                />
+              )}
+              <div>
+                <div className="weather-temp">{weather.temp}°C</div>
+                <div className="weather-desc">{weather.condition}</div>
+              </div>
+              <div className="weather-location">
+                📍{" "}
+                {locationData.address?.county ||
+                  locationData.address?.city ||
+                  location}
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* Search */}
+      <section className="search-section">
+        <div className="container">
+          <div className="search-grid">
+            <div className="search-field">
+              <label>📍 Location</label>
               <input
-                value={areaQuery}
-                onChange={(e) => setAreaQuery(e.target.value)}
+                type="text"
+                value={location}
+                onChange={(e) => setLocation(e.target.value)}
                 placeholder="Anna Nagar, Chennai"
               />
             </div>
 
-            <div className="searchField">
-              <label>Mode</label>
-              <div className="btnRow">
-                <button className="btnGhost" onClick={() => fetchByAreaSearch(activeCategory)}>
-                  Search Area
-                </button>
-                <button className="btnGhost" onClick={() => fetchNearbyMyLocation(activeCategory)}>
-                  Use My Location
-                </button>
-                <button className="btnGhost" onClick={fetchFromDB}>
-                  Saved
-                </button>
-              </div>
-            </div>
-
-            <button className="btnPrimary" onClick={() => fetchByAreaSearch(activeCategory)}>
-              Search
-            </button>
-          </div>
-
-          <div className="catTabs">
-            {CATEGORY_TABS.map((t) => (
-              <button
-                key={t.key}
-                className={`catTab ${activeCategory === t.key ? "active" : ""}`}
-                onClick={() => {
-                  setActiveCategory(t.key);
-                  setPlan(null);
-                  if (mode === "OSM_NEARBY") fetchNearbyMyLocation(t.key);
-                  else if (mode === "DB") fetchFromDB();
-                  else fetchByAreaSearch(t.key);
-                }}
-                type="button"
-              >
-                <span className="catEmoji">{t.emoji}</span>
-                <span className="catLabel">{t.label}</span>
-              </button>
-            ))}
-          </div>
-
-          {/* Budget Controls */}
-          <div className="budgetBar">
-            <div className="budgetItem">
-              <div className="budgetLabel">People</div>
+            <div className="search-field">
+              <label>👥 People</label>
               <input
                 type="number"
                 min="1"
-                max="15"
+                max="20"
                 value={peopleCount}
-                onChange={(e) => setPeopleCount(e.target.value)}
-                className="budgetInput"
+                onChange={(e) => setPeopleCount(Number(e.target.value) || 1)}
               />
             </div>
 
-            <div className="budgetItem">
-              <div className="budgetLabel">Budget per person (₹)</div>
+            <div className="search-field">
+              <label>💰 Budget per person (₹)</label>
               <input
                 type="number"
-                min="50"
-                step="50"
+                min="100"
+                step="100"
                 value={budgetPerPerson}
-                onChange={(e) => setBudgetPerPerson(e.target.value)}
-                className="budgetInput"
+                onChange={(e) => setBudgetPerPerson(Number(e.target.value) || 0)}
               />
             </div>
 
-            <button className="btnPrimary" onClick={onBuildPlan}>
-              Build 1-Day Plan
-            </button>
+            <div className="search-field">
+              <label>📏 Radius (meters)</label>
+              <input
+                type="number"
+                min="500"
+                max="50000"
+                step="500"
+                value={radius}
+                onChange={(e) => setRadius(Number(e.target.value) || 2000)}
+              />
+            </div>
           </div>
 
-          <div className="mutedSmall" style={{ marginTop: 8 }}>
-            {hint}
-          </div>
+          <button className="search-btn" onClick={searchPlaces} disabled={loading}>
+            {loading ? "🔍 Searching..." : "🚀 Search Places"}
+          </button>
+        </div>
+      </section>
 
-          <div className="statRow">
-            <div className="statCard">
-              <div className="statNum">{places.length}</div>
-              <div className="statTxt">Results</div>
-            </div>
-            <div className="statCard">
-              <div className="statNum">₹{budgetPerPerson}</div>
-              <div className="statTxt">Per person budget</div>
-            </div>
-            <div className="statCard">
-              <div className="statNum">{peopleCount}</div>
-              <div className="statTxt">People</div>
-            </div>
+      {/* Categories */}
+      <section className="categories">
+        <div className="container">
+          <div className="category-tabs">
+            {CATEGORIES.map((cat) => (
+              <button
+                key={cat.key}
+                className={`category-tab ${category === cat.key ? "active" : ""}`}
+                style={{ "--tab-color": cat.color }}
+                onClick={() => setCategory(cat.key)}
+              >
+                <span className="tab-emoji">{cat.emoji}</span>
+                <span className="tab-label">{cat.label}</span>
+              </button>
+            ))}
           </div>
         </div>
       </section>
 
-      <main className="container2">
-        {/* PLAN SECTION */}
-        {plan && (
-          <div className="planBox">
-            <div className="planHead">
-              <div>
-                <div className="planTitle">Your 1-Day Plan</div>
-                <div className="mutedSmall">
-                  Total per person: <b>₹{plan.perPersonTotal}</b> • Group total:{" "}
-                  <b>₹{plan.groupTotal}</b>
-                </div>
-              </div>
-              <div className="mutedSmall">
-                Budget per person: ₹{budgetPerPerson} • People: {peopleCount}
-              </div>
+      {/* Stats */}
+      <section className="stats">
+        <div className="container">
+          <div className="stats-grid">
+            <div className="stat-card">
+              <div className="stat-value">{withinBudgetCount}</div>
+              <div className="stat-label">Within Budget</div>
             </div>
-
-            {!plan.ok ? (
-              <div className="empty">
-                <h3>Plan couldn’t be built</h3>
-                <ul style={{ margin: 0, paddingLeft: 18 }}>
-                  {plan.notes.map((n, i) => (
-                    <li key={i}>{n}</li>
-                  ))}
-                </ul>
-              </div>
-            ) : (
-              <div className="planGrid">
-                {plan.slots.map((s) => (
-                  <div className="planCard" key={s.title}>
-                    <div className="planSlot">
-                      <span className="planIcon">{s.icon}</span>
-                      <span className="planSlotTitle">{s.title}</span>
-                    </div>
-                    {s.place ? (
-                      <>
-                        <div className="planPlace">{s.place.name}</div>
-                        <div className="mutedSmall">{s.place.location || "Nearby"}</div>
-                        <div className="mutedSmall" style={{ marginTop: 6 }}>
-                          Est. cost per person:{" "}
-                          <b>
-                            ₹
-                            {mode === "DB"
-                              ? Number(s.place.budget || 0)
-                              : estimateCostPerPerson(s.place.category)}
-                          </b>
-                        </div>
-                      </>
-                    ) : (
-                      <div className="mutedSmall">No option found in budget</div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
+            <div className="stat-card">
+              <div className="stat-value">₹{totalBudget}</div>
+              <div className="stat-label">Total Budget</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-value">⭐ {avgRating}</div>
+              <div className="stat-label">Avg Rating</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-value">{radius}m</div>
+              <div className="stat-label">Search Radius</div>
+            </div>
           </div>
-        )}
 
-        {/* RESULTS LIST */}
-        <div className="sectionHead">
-          <h2 className="h2">
-            {activeCategory} results{" "}
-            <span className="muted">
-              {mode === "OSM_AREA"
-                ? "near your searched area"
-                : mode === "OSM_NEARBY"
-                ? "near you"
-                : "saved"}
-            </span>
-          </h2>
-          <div className="mutedSmall">{areaInfo?.displayName || ""}</div>
+          {withinBudgetCount > 0 && (
+            <button className="plan-btn" onClick={buildDayPlan}>
+              🗓️ Build Day Plan
+            </button>
+          )}
         </div>
+      </section>
 
-        {places.length === 0 ? (
-          <div className="empty">
-            <h3>No results</h3>
-            <p>Try another area or category.</p>
+      {/* Error */}
+      {error && (
+        <div className="container">
+          <div className="error-banner">❌ {error}</div>
+        </div>
+      )}
+
+      {/* Day Plan */}
+      {dayPlan && (
+        <section className="day-plan">
+          <div className="container">
+            <h2>🗓️ Your Day Plan</h2>
+            <div className="plan-grid">
+              <PlanCard time="Morning" place={dayPlan.morning} people={peopleCount} />
+              <PlanCard time="Afternoon" place={dayPlan.afternoon} people={peopleCount} />
+              <PlanCard time="Evening" place={dayPlan.evening} people={peopleCount} />
+            </div>
+            <div className="plan-total">
+              Total Cost: <strong>₹{dayPlan.totalCost}</strong> for {peopleCount} people
+            </div>
           </div>
-        ) : (
-          <div className="grid2">
-            {places.map((p, idx) => (
-              <div className="card2" key={p._id || `${p.name}-${idx}`}>
-                <div className="cardBody">
-                  <div className="cardTitleRow">
-                    <div>
-                      <div className="cardTitle">{p.name}</div>
-                      <div className="cardSub">{p.location || "Nearby"}</div>
-                    </div>
+        </section>
+      )}
 
-                    <div className="badgeStack">
-                      <span className="badge2">{activeCategory}</span>
-                      <span className="badge2 badge2Light">
-                        ₹{mode === "DB" ? Number(p.budget || 0) : estimateCostPerPerson(p.category)} / person
-                      </span>
-                    </div>
-                  </div>
+      {/* Results */}
+      <section className="results">
+        <div className="container">
+          <h2>
+            {loading ? "🔍 Searching..." : `${category} Results`}
+            <span className="result-count"> ({filteredPlaces.length} places)</span>
+          </h2>
 
-                  <div className="miniInfo">
-                    Tip: This place fits budget?{" "}
-                    <b>
-                      {(mode === "DB"
-                        ? Number(p.budget || 0)
-                        : estimateCostPerPerson(p.category)) <= Number(budgetPerPerson)
-                        ? "✅ Yes"
-                        : "❌ No"}
-                    </b>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </main>
+          {loading && (
+            <div className="loading-grid">
+              {[1, 2, 3, 4, 5, 6].map((i) => (
+                <div key={i} className="place-card skeleton" />
+              ))}
+            </div>
+          )}
 
-      <footer className="footer2">Local Explorer • Budget-first planning • People-based recommendations</footer>
+          {!loading && filteredPlaces.length === 0 && (
+            <div className="empty-state">
+              <div className="empty-emoji">😕</div>
+              <h3>No places found within budget</h3>
+              <p>Try increasing your budget or radius</p>
+            </div>
+          )}
+
+          {!loading && filteredPlaces.length > 0 && (
+            <div className="places-grid">
+              {filteredPlaces.map((place) => (
+                <PlaceCard
+                  key={place.id}
+                  place={place}
+                  peopleCount={peopleCount}
+                  budgetPerPerson={budgetPerPerson}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
+
+      <footer className="footer">
+        <div className="container">
+          <p>Powered by Google Places API • Made with ❤️</p>
+        </div>
+      </footer>
     </div>
   );
 }
 
+function PlaceCard({ place, peopleCount, budgetPerPerson }) {
+  const ppl = Number(peopleCount) || 1;
+  const perPerson = Number(budgetPerPerson) || 0;
 
+  const budget = typeof place.budget === "number" ? place.budget : 500;
+  const totalCost = budget * ppl;
+  const withinBudget = totalCost <= perPerson * ppl;
 
+  const imgUrl =
+    place.photos?.length > 0 && place.photos[0]?.url ? place.photos[0].url : "";
 
+  return (
+    <div className="place-card">
+      <div className="card-image">
+        {imgUrl ? <img src={imgUrl} alt={place.name} /> : <div className="no-image">📍</div>}
 
+        <div className="card-badges">
+          {place.openNow && <span className="badge-open">Open Now</span>}
+          {withinBudget && <span className="badge-budget">Within Budget ✓</span>}
+        </div>
+      </div>
 
+      <div className="card-content">
+        <h3>{place.name}</h3>
+        <p className="card-address">📍 {place.location}</p>
+
+        <div className="card-stats">
+          <div className="stat">
+            <span className="stat-icon">⭐</span>
+            <span>{place.rating ?? "N/A"}</span>
+            <span className="stat-small">({place.ratingCount || 0})</span>
+          </div>
+          <div className="stat">
+            <span className="stat-icon">💰</span>
+            <span>₹{budget}</span>
+            <span className="stat-small">/ person</span>
+          </div>
+          <div className="stat">
+            <span className="stat-icon">👥</span>
+            <span>₹{totalCost}</span>
+            <span className="stat-small">total</span>
+          </div>
+        </div>
+
+        {place.googleMapsUrl && (
+          <a
+            href={place.googleMapsUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="card-btn"
+          >
+            View on Google Maps →
+          </a>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PlanCard({ time, place, people }) {
+  if (!place) return null;
+  const ppl = Number(people) || 1;
+
+  return (
+    <div className="plan-card">
+      <div className="plan-time">{time}</div>
+      <h3>{place.name}</h3>
+      <p>📍 {place.location}</p>
+      <p className="plan-cost">
+        ₹{(place.budget || 0) * ppl} for {ppl} people
+      </p>
+    </div>
+  );
+}

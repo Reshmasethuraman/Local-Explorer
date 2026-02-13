@@ -1,100 +1,118 @@
 const express = require("express");
-const axios = require("axios");
-
 const router = express.Router();
+const {
+  searchNearbyPlaces,
+  getPlaceDetails
+} = require("../services/googlePlacesService");
 
 /**
- * GET /api/google/nearby?lat=13.0827&lng=80.2707&type=restaurant&radius=1500
+ * GET /api/google/nearby?lat=13.0827&lng=80.2707&category=Food&radius=2000
  */
 router.get("/nearby", async (req, res) => {
   try {
-    const { lat, lng, type = "restaurant", radius = 1500 } = req.query;
+    const { lat, lng, category = "Food", radius = 2000 } = req.query;
 
     if (!lat || !lng) {
-      return res.status(400).json({ message: "lat and lng are required" });
+      return res.status(400).json({ 
+        success: false,
+        message: "lat and lng are required" 
+      });
     }
 
-    const url = "https://places.googleapis.com/v1/places:searchNearby";
+    console.log(`🔍 Searching ${category} near ${lat},${lng} (${radius}m)`);
 
-    const body = {
-      includedTypes: [type], // e.g. restaurant, park, cafe, movie_theater
-      maxResultCount: 15,
-      locationRestriction: {
-        circle: {
-          center: { latitude: Number(lat), longitude: Number(lng) },
-          radius: Number(radius),
-        },
-      },
-    };
-
-    const resp = await axios.post(url, body, {
-      headers: {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": process.env.GOOGLE_PLACES_API_KEY,
-        // FieldMask is REQUIRED in Places API (New)
-        "X-Goog-FieldMask": [
-          "places.id",
-          "places.displayName",
-          "places.formattedAddress",
-          "places.location",
-          "places.types",
-          "places.rating",
-          "places.userRatingCount",
-          "places.currentOpeningHours",
-          "places.websiteUri",
-          "places.googleMapsUri",
-        ].join(","),
-      },
-      timeout: 15000,
+    const places = await searchNearbyPlaces({
+      lat,
+      lng,
+      category,
+      radius
     });
 
-    return res.json(resp.data);
-  } catch (err) {
-    // Show Google error message clearly
-    const data = err?.response?.data;
-    console.error("Google Places nearby error:", data || err.message);
-    return res.status(500).json({
-      message: "Google Places API error",
-      google: data || null,
+    console.log(`✅ Found ${places.length} places`);
+
+    res.json({
+      success: true,
+      count: places.length,
+      category,
+      location: { lat: parseFloat(lat), lng: parseFloat(lng) },
+      radius: parseInt(radius),
+      places
+    });
+
+  } catch (error) {
+    console.error("❌ Nearby search error:", error.message);
+    res.status(500).json({
+      success: false,
+      message: error.message,
+      error: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 });
-router.get("/test", async (req, res) => {
+
+/**
+ * GET /api/google/place/:placeId
+ */
+router.get("/place/:placeId", async (req, res) => {
   try {
-    const axios = require("axios");
+    const { placeId } = req.params;
 
-    const url =
-      "https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=13.0827,80.2707&radius=1500&type=restaurant&key=" +
-      process.env.GOOGLE_PLACES_API_KEY;
+    console.log(`📍 Getting details for place: ${placeId}`);
 
-    const response = await axios.get(url);
+    const details = await getPlaceDetails(placeId);
 
     res.json({
-      status: response.data.status,
-      error_message: response.data.error_message || null,
-      results_count: response.data.results ? response.data.results.length : 0,
+      success: true,
+      place: details
     });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+
+  } catch (error) {
+    console.error("❌ Place details error:", error.message);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
+ * POST /api/google/filter-by-budget
+ * Filter places by budget and people count
+ */
+router.post("/filter-by-budget", async (req, res) => {
+  try {
+    const { places, budgetPerPerson, peopleCount } = req.body;
+
+    if (!places || !budgetPerPerson) {
+      return res.status(400).json({
+        success: false,
+        message: "places and budgetPerPerson are required"
+      });
+    }
+
+    const filtered = places.filter(place => {
+      const totalCost = place.budget * (peopleCount || 1);
+      const totalBudget = budgetPerPerson * (peopleCount || 1);
+      return totalCost <= totalBudget;
+    });
+
+    // Sort by rating
+    filtered.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+
+    res.json({
+      success: true,
+      original: places.length,
+      filtered: filtered.length,
+      budgetPerPerson,
+      peopleCount,
+      places: filtered
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
   }
 });
 
 module.exports = router;
-router.get("/test", async (req, res) => {
-  try {
-    const axios = require("axios");
-
-    const url =
-      "https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=13.0827,80.2707&radius=1500&type=restaurant&key=" +
-      process.env.GOOGLE_PLACES_API_KEY;
-
-    const response = await axios.get(url);
-
-    res.json({
-      status: response.data.status,
-      error_message: response.data.error_message || null,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
