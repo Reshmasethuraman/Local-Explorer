@@ -4,9 +4,9 @@ A budget-friendly local travel planner that helps you discover places nearby and
 
 ## Live Demo
 
-🚀 **Deployment:** Pending deployment
+🌐 **Frontend:** Deploying on Vercel
 
-> The project is a full-stack application with a React/Vite frontend and an Express/MongoDB backend. The repository currently needs a hosting setup for the backend and frontend before a reliable public URL can be added here.
+🔗 **Backend API:** https://local-explorer-api.onrender.com
 
 ## Features
 
@@ -33,7 +33,7 @@ A budget-friendly local travel planner that helps you discover places nearby and
 - MongoDB / Mongoose
 - Axios
 - Google Places API
-- OpenStreetMap-based fallback routes
+- OpenStreetMap-based fallback
 
 ## Project Structure
 
@@ -53,18 +53,7 @@ Local-Explorer/
 
 ## Getting Started
 
-### 1. Clone the repository
-
-```bash
-git clone https://github.com/Reshmasethuraman/Local-Explorer.git
-cd Local-Explorer
-```
-
-### 2. Configure the backend
-
-Create `backend/.env` with the required server-side values, including your MongoDB connection string and Google Places API key.
-
-Then install dependencies and start the API:
+### Backend
 
 ```bash
 cd backend
@@ -72,11 +61,11 @@ npm install
 npm start
 ```
 
-The backend is configured to use `PORT` when provided and otherwise defaults to port `5000`.
+The backend uses the `PORT` environment variable when provided and otherwise defaults to port `5000`.
 
-### 3. Configure the frontend
+Set the required MongoDB and Google Places credentials as environment variables. Never commit secrets to GitHub.
 
-Create/configure the frontend environment variables required by Firebase and the application, then run:
+### Frontend
 
 ```bash
 cd frontend/frontend
@@ -84,37 +73,31 @@ npm install
 npm run dev
 ```
 
-For a production build:
+For production:
 
 ```bash
 npm run build
 ```
 
-## Important Deployment Notes
+The deployed frontend is configured to send the application's existing API requests to the Render backend at `https://local-explorer-api.onrender.com`.
 
-The frontend currently uses `http://localhost:5000` as its API base URL, so production deployment requires changing that value to the deployed backend URL.
+## Deployment
 
-The backend package currently declares `node index.js` in its `start` script while the server entry file in the repository is `server.js`. Before deploying the backend, update the start script to use `node server.js` (or add the corresponding `index.js`).
+### Backend — Render
 
-Do not commit real API keys, Firebase private credentials, or MongoDB passwords. Use environment variables in the hosting provider instead.
+- Root directory: `backend`
+- Build command: `npm install`
+- Start command: `npm start`
+- Live API: https://local-explorer-api.onrender.com
 
-## Available Scripts
+### Frontend — Vercel
 
-### Frontend
+- Root directory: `frontend/frontend`
+- Framework: Vite
+- Build command: `npm run build`
+- Output directory: `dist`
 
-```bash
-npm run dev
-npm run build
-npm run lint
-npm run preview
-```
-
-### Backend
-
-```bash
-npm start
-npm run dev
-```
+After the Vercel deployment is created, add the Vercel domain to Firebase Authentication → Authorized domains so Google sign-in works on the live site.
 
 ## Repository
 
